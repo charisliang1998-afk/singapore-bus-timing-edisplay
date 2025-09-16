@@ -1,0 +1,64 @@
+name: Update TRMNL JSON
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"  
+  workflow_dispatch: {}      
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch LTA data and update JSON
+        env:
+          LTA_API_KEY: ${{ secrets.LTA_API_KEY }}
+          STOP_A: ${{ secrets.STOP_A }}
+          STOP_B: ${{ secrets.STOP_B }}
+          STOP_C: ${{ secrets.STOP_C }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+          from datetime import datetime, timezone
+
+          def minutes(iso):
+              if not iso: return None
+              try:
+                  dt = datetime.fromisoformat(iso.replace('Z','+00:00'))
+                  now = datetime.now(timezone.utc)
+                  return max(0, int((dt - now).total_seconds()//60))
+              except Exception: return None
+
+          def fetch(code, key):
+              url = f"https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode={code}"
+              req = urllib.request.Request(url, headers={'AccountKey': key, 'accept':'application/json'})
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  data = json.loads(resp.read().decode('utf-8'))
+              out = []
+              for svc in data.get('Services', [])[:6]:
+                  nb, nb2 = svc.get('NextBus',{}), svc.get('NextBus2',{})
+                  out.append({'no':svc.get('ServiceNo','?'),
+                              'min1':minutes(nb.get('EstimatedArrival')),
+                              'min2':minutes(nb2.get('EstimatedArrival'))})
+              return {'code': code, 'services': out}
+
+          key = os.environ['LTA_API_KEY']
+          a = os.environ.get('STOP_A','01109')
+          b = os.environ.get('STOP_B','01219')
+          c = os.environ.get('STOP_C','02151')
+          data = {'stop_a':fetch(a,key),'stop_b':fetch(b,key),'stop_c':fetch(c,key)}
+
+          os.makedirs("docs", exist_ok=True)
+          with open("docs/data.json","w") as f:
+              json.dump(data, f, separators=(',',':'))
+          print("Updated docs/data.json")
+          PY
+
+      - name: Commit updated JSON
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/data.json
+          git commit -m "Update JSON" || echo "No changes to commit"
+          git push
