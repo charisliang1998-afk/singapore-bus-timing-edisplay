@@ -1,15 +1,40 @@
 name: Update TRMNL JSON
-
 on:
+  workflow_dispatch: {}
   schedule:
-    - cron: "*/5 * * * *"  
-  workflow_dispatch: {}      
+    - cron: "*/5 * * * *"
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check secrets presence
+        shell: bash
+        run: |
+          echo "Key length: ${#LTA_API_KEY}"
+          echo "STOP_A=${STOP_A:-01109} STOP_B=${STOP_B:-01219} STOP_C=${STOP_C:-02151}"
+        env:
+          LTA_API_KEY: ${{ secrets.LTA_API_KEY }}
+          STOP_A: ${{ secrets.STOP_A }}
+          STOP_B: ${{ secrets.STOP_B }}
+          STOP_C: ${{ secrets.STOP_C }}
+
+      - name: Probe LTA BusArrival v3 (01109)
+        shell: bash
+        env:
+          LTA_API_KEY: ${{ secrets.LTA_API_KEY }}
+        run: |
+          set -e
+          echo "Hitting v3/BusArrival…"
+          code=$(curl -sS -o resp.json -w "%{http_code}" \
+            -H "AccountKey: $LTA_API_KEY" -H "accept: application/json" \
+            "https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode=01109")
+          echo "HTTP $code"
+          head -c 400 resp.json || true
 
       - name: Fetch LTA data and update JSON
         env:
@@ -19,43 +44,59 @@ jobs:
           STOP_C: ${{ secrets.STOP_C }}
         run: |
           python3 - <<'PY'
-          import os, json, urllib.request
+          import os, json, urllib.request, urllib.error, sys
           from datetime import datetime, timezone
 
           def minutes(iso):
-              if not iso: return None
-              try:
-                  dt = datetime.fromisoformat(iso.replace('Z','+00:00'))
-                  now = datetime.now(timezone.utc)
-                  return max(0, int((dt - now).total_seconds()//60))
-              except Exception: return None
+            if not iso: return None
+            try:
+              dt = datetime.fromisoformat(iso.replace('Z','+00:00'))
+              now = datetime.now(timezone.utc)
+              return max(0, int((dt - now).total_seconds()//60))
+            except Exception:
+              return None
 
           def fetch(code, key):
-              url = f"https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode={code}"
-              req = urllib.request.Request(url, headers={'AccountKey': key, 'accept':'application/json'})
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  data = json.loads(resp.read().decode('utf-8'))
-              out = []
-              for svc in data.get('Services', [])[:6]:
-                  nb, nb2 = svc.get('NextBus',{}), svc.get('NextBus2',{})
-                  out.append({'no':svc.get('ServiceNo','?'),
-                              'min1':minutes(nb.get('EstimatedArrival')),
-                              'min2':minutes(nb2.get('EstimatedArrival'))})
-              return {'code': code, 'services': out}
+            url = f"https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode={code}"
+            req = urllib.request.Request(url, headers={'AccountKey': key, 'accept':'application/json'})
+            try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode('utf-8', 'replace')
+                data = json.loads(raw)
+            except urllib.error.HTTPError as e:
+              print(f"[ERROR] HTTP {e.code} from LTA for stop {code}: {e.read().decode('utf-8','ignore')[:300]}", file=sys.stderr)
+              return {'code': code, 'services': []}
+            except Exception as e:
+              print(f"[ERROR] Request failed for stop {code}: {e}", file=sys.stderr)
+              return {'code': code, 'services': []}
 
-          key = os.environ['LTA_API_KEY']
+            outs = []
+            for svc in data.get('Services', [])[:6]:
+              nb, nb2 = svc.get('NextBus', {}), svc.get('NextBus2', {})
+              outs.append({'no': svc.get('ServiceNo','?'),
+                           'min1': minutes(nb.get('EstimatedArrival')),
+                           'min2': minutes(nb2.get('EstimatedArrival'))})
+            return {'code': code, 'services': outs}
+
+          key = os.environ.get('LTA_API_KEY')
+          if not key:
+            print("[FATAL] LTA_API_KEY is missing (secret not set)", file=sys.stderr)
+            sys.exit(1)
+
           a = os.environ.get('STOP_A','01109')
           b = os.environ.get('STOP_B','01219')
           c = os.environ.get('STOP_C','02151')
-          data = {'stop_a':fetch(a,key),'stop_b':fetch(b,key),'stop_c':fetch(c,key)}
 
-          os.makedirs("docs", exist_ok=True)
-          with open("docs/data.json","w") as f:
-              json.dump(data, f, separators=(',',':'))
-          print("Updated docs/data.json")
+          payload = {'stop_a': fetch(a,key), 'stop_b': fetch(b,key), 'stop_c': fetch(c,key)}
+
+          os.makedirs('docs', exist_ok=True)
+          with open('docs/data.json', 'w') as f:
+            json.dump(payload, f, separators=(',',':'))
+
+          print("Wrote docs/data.json")
           PY
 
-      - name: Commit updated JSON
+ - name: Commit updated JSON
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
