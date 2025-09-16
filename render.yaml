@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: trmnl-sg-bus-plugin
+    runtime: python
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --preload --bind 0.0.0.0:$PORT
+    envVars:
+      - key: LTA_API_KEY
+        sync: false
+      - key: TRMNL_CLIENT_ID
+        sync: false
+      - key: TRMNL_CLIENT_SECRET
+        sync: false
+      - key: DEFAULT_STOP_A
+        value: "01109"
+      - key: DEFAULT_STOP_B
+        value: "01219"
+      - key: DEFAULT_STOP_C
+        value: "02151"
+      - key: DB_PATH
+        value: "data.sqlite3"
+    healthCheckPath: /healthz
+    autoDeploy: true
