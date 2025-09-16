@@ -37,7 +37,7 @@ def get_db():
 def lta_arrivals(stop_code: str):
     if not stop_code:
         return {"Services": []}
-    url = "https://datamall2.mytransport.sg/ltaodataservice/BusArrivalv2"
+    url = "https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival"
     try:
         r = requests.get(url, params={"BusStopCode": stop_code},
                          headers={"AccountKey": LTA_API_KEY},
@@ -46,6 +46,41 @@ def lta_arrivals(stop_code: str):
         return r.json()
     except Exception as e:
         return {"error": str(e), "Services": []}
+def minutes_to_arrival(iso_str: str):
+    """Convert LTA ISO time to integer minutes from now; return None if unknown."""
+    if not iso_str:
+        return None
+    try:
+        t = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        minutes = int((t - now).total_seconds() // 60)
+        return max(0, minutes)
+    except Exception:
+        return None
+@app.get("/poll")
+def poll():
+    # Accept overrides via query string; fall back to DEFAULT_STOPS
+    stop_a = (request.args.get("stop_a") or DEFAULT_STOPS[0]).strip()
+    stop_b = (request.args.get("stop_b") or DEFAULT_STOPS[1]).strip()
+    stop_c = (request.args.get("stop_c") or DEFAULT_STOPS[2]).strip()
+
+    def pack(code: str):
+        data = lta_arrivals(code)
+        services = []
+        for svc in data.get("Services", [])[:8]:  # keep payload small
+            services.append({
+                "no":   svc.get("ServiceNo", "?"),
+                "min1": minutes_to_arrival((svc.get("NextBus")  or {}).get("EstimatedArrival")),
+                "min2": minutes_to_arrival((svc.get("NextBus2") or {}).get("EstimatedArrival")),
+            })
+        return {"code": code, "services": services}
+
+    return jsonify({
+        "stop_a": pack(stop_a),
+        "stop_b": pack(stop_b),
+        "stop_c": pack(stop_c),
+    })
+
 
 def fmt_time(iso_str: str):
     if not iso_str:
